@@ -1,8 +1,8 @@
 # Cleaning Reference Databases - 60+ species --------------------------------------------
-# Cinthia Pietromonaco
+# Cinthia Pietromonaco & Ido Bar
 # Test 1 - with species exported from ala within mbrc
 # Rules: 1. complete sequence 2. herbarium voucher  3.ITS2  4. sequence length between 200-2500 5.Viridiplantae
-install.packages("pak") # best package ever to install other packages, see https://pak.r-lib.org/
+#install.packages("pak") # best package ever to install other packages, see https://pak.r-lib.org/
 library(pak)
 # install packages for parallel processing, see https://furrr.futureverse.org/articles/progress.html
 pkg_install(c("furrr", "progressr")) 
@@ -51,19 +51,30 @@ test_set <- head(taxa, n = 50)
 
 test_search_string <- paste0(searchdef, " (",
                             paste(glue('"{test_set$`Species Name`}"[Organism]'), collapse = " OR "), ")")
-
 # try to retrieve all search results for all species at once!!
 res <- entrez_search(db="nuccore",
                      term=test_search_string,
                      use_history = TRUE)
 res$web_history
 
+#chunk searches query strings into groups of 50 species
+species_chunks <- split(taxa$`Species Name`, ceiling(seq_along(taxa$`Species Name`)/50))
+chunked_search_strings <- lapply(species_chunks, function(chunk) {
+  paste0(searchdef, " (",
+         paste(glue('"{taxa$`Species Name`}"[Organism]'), collapse = " OR "), ")")
+})
+
+chunked_search_strings <- enframe(chunked_search_strings)
+
 # Step 2: Download FASTA files from GenBank ---------------------------------------
-# library(rentrez)
-
-
 #entrez_db_summary('nucleotide')	 #checking its the right database
 #entrez_db_searchable("nucleotide") #checking what search terms we can use
+get_res_history <- function(query){
+  res <- entrez_search(db="nuccore",
+                       term=query,
+                       use_history = TRUE)
+  return(data.frame(query = query, search_result = res$Count))
+}
 
 # create a function to extract the title, accession and sequence from an Entrez id
 
@@ -122,12 +133,6 @@ get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_siz
   # sequence_info$organism
   return(sequence_info)
 }
-# test on one species name
-res <- entrez_search(db="nuccore",
-                            term=test_search_string,
-                            retmax=5000, use_history = TRUE)
-
-
 
 
 # use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
@@ -141,12 +146,14 @@ insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = ra
 # test_input <- head(taxa, 50)
 chunk_size=100
 
+
 # # process results
+
 test_res <- seq(1,res$count,chunk_size) %>% 
   map_dfr(~get_NCBI_info_from_web_history(web_history_obj = res$web_history,
                                            rec_start = .x, chunk_size = chunk_size))
 
-
+#NCBI recommends that users post no more than three URL requests per second and limit large jobs to either weekends or between 9:00 PM and 5:00 AM Eastern time during weekdays.
 results_data <- taxa$`Species Name` %>% 
   imap_dfr(.f = ~{
     index = .y

@@ -3,17 +3,18 @@
 # Test 1 - with species exported from ala within mbrc
 # Rules: 1. complete sequence 2. herbarium voucher  3.ITS2  4. sequence length between 200-2500 5.Viridiplantae
 #install.packages("pak") # best package ever to install other packages, see https://pak.r-lib.org/
-library(pak)
+#library(pak)
 # install packages for parallel processing, see https://furrr.futureverse.org/articles/progress.html
-pkg_install(c("furrr", "progressr")) 
+#pkg_install(c("furrr", "progressr")) 
 # install utility packages that make life easy
 # pacman provides the easiest way to load packages in one line, see https://trinker.github.io/pacman/vignettes/Introduction_to_pacman.html
-pkg_install(c("pacman", "janitor")) 
+#pkg_install(c("pacman", "janitor")) 
 # install bioinformatics-related packages
-pkg_install(c("rentrez", "seqinr", "myTAI", "taxize", "taxonomizr"))
+#pkg_install(c("rentrez", "seqinr", "myTAI", "taxize", "taxonomizr"))
 
 # load custom functions that Ido wrote 
 devtools::source_gist("7f63547158ecdbacf31b54a58af0d1cc", filename = "Util.R")
+
 #load packages
 pacman::p_load(tidyverse, rentrez, janitor, glue, furrr, progressr, seqinr, taxonomizr)
 
@@ -64,18 +65,47 @@ chunked_search_strings <- lapply(species_chunks, function(chunk) {
          paste(glue('"{taxa$`Species Name`}"[Organism]'), collapse = " OR "), ")")
 })
 
-chunked_search_strings <- enframe(chunked_search_strings)
+chunked_search_strings <- data.frame(chunked_search_strings)
 
 # Step 2: Download FASTA files from GenBank ---------------------------------------
 #entrez_db_summary('nucleotide')	 #checking its the right database
 #entrez_db_searchable("nucleotide") #checking what search terms we can use
-get_res_history <- function(query){
-  res <- entrez_search(db="nuccore",
-                       term=query,
+get_res_then_NCBI_info_from_web_history <- function(web_history_obj, rec_start, res, chunk_size=100){
+  res_history <- entrez_search(db="nuccore",
+                       term=res,
                        use_history = TRUE)
   return(data.frame(query = query, search_result = res$Count))
-}
-
+    # rec_start = 1
+    # chunk_size=50
+    # web_history_obj = res$web_history
+    # fetch this entry as FASTA
+    res_fasta <- entrez_fetch(db='nuccore', rettype = c("fasta")  , # id = res_id, 
+                              web_history = res_history,
+                              retmax=chunk_size, retstart=rec_start)
+    # convert into a vector
+    fasta_vector <- str_split(res_fasta, pattern = ">") %>% unlist() %>% 
+      stringi::stri_remove_empty_na() %>% paste0(">", .)
+    # res_features <- entrez_fetch(db="nuccore",  rettype="text", # id=res_id,
+    #                              web_history = web_history_obj , 
+    #                              retmax=chunk_size, retstart=rec_start) 
+    # fetch this entry's summary info
+    res_summary <- entrez_summary(db='nuccore',web_history = web_history_obj, #  id = res_id, 
+                                  retmax=chunk_size, retstart=rec_start) %>% 
+      extract_from_esummary(., c("title", "extra", "taxid", 'subtype', 'organism', 
+                                 'gi', 'uid'), simplify = FALSE)
+    
+    # res_summary[[1]]
+    summary_table <- res_summary %>% 
+      map_dfr(.f = ~as_tibble(.x) %>% mutate(across(everything(), .fns = as.character)))
+    # summary_table$extra[2]
+    
+    # create a table with the transcript info
+    sequence_info <- summary_table %>% rename(feature = subtype) %>% 
+      mutate(fasta = fasta_vector, taxid = as.integer(taxid)) # also process accession out of the extra column
+    # sequence_info$organism
+    return(sequence_info)
+  }
+  
 # create a function to extract the title, accession and sequence from an Entrez id
 
 get_NCBI_info <- function(res_id){
@@ -142,6 +172,7 @@ plan(multisession, workers = min(4, availableCores())) # adjust cores based on y
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
 rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
 insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
+insistent_retrieve_info <- insistently(get_res_then_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
 # process all ids from all species
 # test_input <- head(taxa, 50)
 chunk_size=100
@@ -154,7 +185,7 @@ test_res <- seq(1,res$count,chunk_size) %>%
                                            rec_start = .x, chunk_size = chunk_size))
 
 #NCBI recommends that users post no more than three URL requests per second and limit large jobs to either weekends or between 9:00 PM and 5:00 AM Eastern time during weekdays.
-results_data <- taxa$`Species Name` %>% 
+results_data <- chunked_search_strings$chunked_search_strings %>% 
   imap_dfr(.f = ~{
     index = .y
     species_name = .x

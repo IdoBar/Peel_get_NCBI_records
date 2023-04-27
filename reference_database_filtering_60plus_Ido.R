@@ -371,7 +371,7 @@ history_records_chunk_size=100
 taxa_chunk_size <- 50
 
 # taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
-# split a dataframe into subsets by size
+# split a dataframe into subsets by size (now included in my Utils.R file that is loaded at the beginning)
 split_df <- function(df, group_size){
   split(df, gl(ceiling(nrow(df)/group_size), group_size, nrow(df)))
 }

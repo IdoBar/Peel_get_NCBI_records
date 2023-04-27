@@ -39,8 +39,9 @@ set_entrez_key("33ec35e1973e4928beafd47bee86492be109")
 searchdef <- '((internal transcribed spacer[All Fields]) OR (ITS[All Fields])) AND (plants[filter]) AND (200[SLEN] : 2500[SLEN]) AND (flowering plants[porgn]) AND'
 
 species_name <- "SPECIES_NAME"
-#string for species (do you have the special double quotes in purpose or is t because it was copied-pasted from a web page or a word document?)
 # species.str <- '"SPECIES_NAME"[Organism] OR '
+
+
 
 #upload list
 #make sure spelling is ok and if there are synonyms for certain species.
@@ -52,6 +53,7 @@ test_set <- head(taxa, n = 50)
 
 test_search_string <- paste0(searchdef, " (",
                             paste(glue('"{test_set$`Species Name`}"[Organism]'), collapse = " OR "), ")")
+
 # try to retrieve all search results for all species at once!!
 res <- entrez_search(db="nuccore",
                      term=test_search_string,
@@ -59,6 +61,7 @@ res <- entrez_search(db="nuccore",
 res$web_history
 
 #chunk searches query strings into groups of 50 species
+char_limit <- 2048
 species_chunks <- split(taxa$`Species Name`, ceiling(seq_along(taxa$`Species Name`)/50))
 chunked_search_strings <- lapply(species_chunks, function(chunk) {
   paste0(searchdef, " (",
@@ -70,41 +73,7 @@ chunked_search_strings <- data.frame(chunked_search_strings)
 # Step 2: Download FASTA files from GenBank ---------------------------------------
 #entrez_db_summary('nucleotide')	 #checking its the right database
 #entrez_db_searchable("nucleotide") #checking what search terms we can use
-get_res_then_NCBI_info_from_web_history <- function(web_history_obj, rec_start, res, chunk_size=100){
-  res_history <- entrez_search(db="nuccore",
-                       term=res,
-                       use_history = TRUE)
-  return(data.frame(query = query, search_result = res$Count))
-    # rec_start = 1
-    # chunk_size=50
-    # web_history_obj = res$web_history
-    # fetch this entry as FASTA
-    res_fasta <- entrez_fetch(db='nuccore', rettype = c("fasta")  , # id = res_id, 
-                              web_history = res_history,
-                              retmax=chunk_size, retstart=rec_start)
-    # convert into a vector
-    fasta_vector <- str_split(res_fasta, pattern = ">") %>% unlist() %>% 
-      stringi::stri_remove_empty_na() %>% paste0(">", .)
-    # res_features <- entrez_fetch(db="nuccore",  rettype="text", # id=res_id,
-    #                              web_history = web_history_obj , 
-    #                              retmax=chunk_size, retstart=rec_start) 
-    # fetch this entry's summary info
-    res_summary <- entrez_summary(db='nuccore',web_history = web_history_obj, #  id = res_id, 
-                                  retmax=chunk_size, retstart=rec_start) %>% 
-      extract_from_esummary(., c("title", "extra", "taxid", 'subtype', 'organism', 
-                                 'gi', 'uid'), simplify = FALSE)
-    
-    # res_summary[[1]]
-    summary_table <- res_summary %>% 
-      map_dfr(.f = ~as_tibble(.x) %>% mutate(across(everything(), .fns = as.character)))
-    # summary_table$extra[2]
-    
-    # create a table with the transcript info
-    sequence_info <- summary_table %>% rename(feature = subtype) %>% 
-      mutate(fasta = fasta_vector, taxid = as.integer(taxid)) # also process accession out of the extra column
-    # sequence_info$organism
-    return(sequence_info)
-  }
+
   
 # create a function to extract the title, accession and sequence from an Entrez id
 
@@ -172,7 +141,7 @@ plan(multisession, workers = min(4, availableCores())) # adjust cores based on y
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
 rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
 insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
-insistent_retrieve_info <- insistently(get_res_then_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
+#insistent_retrieve_info <- insistently(get_res_then_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
 # process all ids from all species
 # test_input <- head(taxa, 50)
 chunk_size=100
@@ -184,8 +153,9 @@ test_res <- seq(1,res$count,chunk_size) %>%
   map_dfr(~get_NCBI_info_from_web_history(web_history_obj = res$web_history,
                                            rec_start = .x, chunk_size = chunk_size))
 
+
 #NCBI recommends that users post no more than three URL requests per second and limit large jobs to either weekends or between 9:00 PM and 5:00 AM Eastern time during weekdays.
-results_data <- chunked_search_strings$chunked_search_strings %>% 
+results_data <- chunked_search_strings$chunked_search_strings[1] %>% 
   imap_dfr(.f = ~{
     index = .y
     species_name = .x
@@ -366,3 +336,55 @@ library(seqinr)
 write.fasta(as.list(end$sequence),names = end$taxa_link, 
             file.out = "/Users/cinthiapietromonaco/Desktop/its2.somethingthatmakessense.date.tax.fasta")
 
+
+
+
+# testing on 27/04/2023 ---------------------------------------------------
+species_chunk_size <- 50
+
+process_taxa <- function(taxa_list){
+  # create test dataset
+  #taxa_subset <- head(taxa, n = 50)
+  taxa_search_string <- paste0(searchdef, " (",
+                               paste(glue('"{taxa_list}"[Organism]'), collapse = " OR "), ")")
+  # try to retrieve all search results for all species at once!!
+  res <- entrez_search(db="nuccore",
+                       term=taxa_search_string,
+                       use_history = TRUE)
+  return(res$web_history) 
+}
+
+taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+  mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]'))
+
+# use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
+plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
+
+# run in parallel (with progress bar)
+# rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
+rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
+insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
+insistent_retrieve_info <- insistently(process_taxa, rate = rate, quiet = FALSE)
+
+chunk_size=100
+
+taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
+taxa_chunks <- split(taxa, gl(ceiling(nrow(taxa)/species_chunk_size), species_chunk_size, nrow(taxa)))
+
+with_progress({
+      p <- progressor(steps = length(taxa_chunks))
+      results_table <- taxa_chunks %>% 
+        future_imap_dfr(.f = ~{
+          index = .y #chunks of list being processed
+         # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
+          chunk_web_history <- process_taxa(.x$`Species Name`)
+          res <- seq(1,chunk_web_history$count,chunk_size) %>% 
+            map_dfr(~get_NCBI_info_from_web_history(web_history_obj = chunk_web_history$web_history,
+                                                    rec_start = .x, chunk_size = chunk_size))
+          p()
+          return(res)
+        }) 
+    # LogMsg(glue("Finished processing search query for '{species_name}', waiting 1 seconds before the next one"))
+    Sys.sleep(0.5) # introduce a delay between queries to not to overload the server
+   # results_table %>% mutate(species_name = species_name, query = query)
+  })

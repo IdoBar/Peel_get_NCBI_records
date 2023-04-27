@@ -351,7 +351,7 @@ process_taxa <- function(taxa_list){
   res <- entrez_search(db="nuccore",
                        term=taxa_search_string,
                        use_history = TRUE)
-  return(res$web_history) 
+  return(res) 
 }
 
 taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
@@ -364,11 +364,11 @@ plan(multisession, workers = min(4, availableCores())) # adjust cores based on y
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
 rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
 insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
-insistent_retrieve_info <- insistently(process_taxa, rate = rate, quiet = FALSE)
+# insistent_retrieve_info <- insistently(process_taxa, rate = rate, quiet = FALSE)
 
 chunk_size=100
 
-taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
+# taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
 taxa_chunks <- split(taxa, gl(ceiling(nrow(taxa)/species_chunk_size), species_chunk_size, nrow(taxa)))
 
 with_progress({
@@ -376,10 +376,12 @@ with_progress({
       results_table <- taxa_chunks %>% 
         future_imap_dfr(.f = ~{
           index = .y #chunks of list being processed
+          taxa_chunk <- .x
+          # taxa_chunk <- taxa_chunks[[1]]
          # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
-          chunk_web_history <- process_taxa(.x$`Species Name`)
-          res <- seq(1,chunk_web_history$count,chunk_size) %>% 
-            map_dfr(~get_NCBI_info_from_web_history(web_history_obj = chunk_web_history$web_history,
+          chunk_res <- process_taxa(taxa_list = taxa_chunk$`Species Name`)
+          res <- seq(1,chunk_res$count,chunk_size) %>% 
+            map_dfr(~get_NCBI_info_from_web_history(web_history_obj = chunk_res$web_history,
                                                     rec_start = .x, chunk_size = chunk_size))
           p()
           return(res)

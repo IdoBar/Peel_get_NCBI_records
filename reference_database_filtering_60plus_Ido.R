@@ -16,7 +16,7 @@
 devtools::source_gist("7f63547158ecdbacf31b54a58af0d1cc", filename = "Util.R")
 
 #load packages
-pacman::p_load(tidyverse, rentrez, janitor, glue, furrr, progressr, seqinr, taxonomizr)
+pacman::p_load(tidyverse, rentrez, janitor, glue, furrr, progressr, seqinr, taxonomizr, tictoc)
 
 # set NCBI API key - this allows yo to send more queries to Entrez without timing out - see more details at https://support.nlm.nih.gov/knowledgebase/article/KA-05318/en-us and https://support.nlm.nih.gov/knowledgebase/article/KA-05317/en-us
 set_entrez_key("33ec35e1973e4928beafd47bee86492be109")
@@ -127,6 +127,7 @@ get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_siz
   # summary_table$extra[2]
   
     # create a table with the transcript info
+  if (!"subtype" %in% names(summary_table)) summary_table$subtype <- ""
   sequence_info <- summary_table %>% rename(feature = subtype) %>% 
     mutate(fasta = fasta_vector, taxid = as.integer(taxid)) # also process accession out of the extra column
   # sequence_info$organism
@@ -355,7 +356,7 @@ process_taxa <- function(taxa_list){
 }
 
 taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
-  mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]'))
+  mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 
 # use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
 plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
@@ -366,27 +367,45 @@ rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to n
 insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
 # insistent_retrieve_info <- insistently(process_taxa, rate = rate, quiet = FALSE)
 
-chunk_size=100
+history_records_chunk_size=100
+taxa_chunk_size <- 50
 
 # taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
-taxa_chunks <- split(taxa, gl(ceiling(nrow(taxa)/species_chunk_size), species_chunk_size, nrow(taxa)))
+# split a dataframe into subsets by size
+split_df <- function(df, group_size){
+  split(df, gl(ceiling(nrow(df)/group_size), group_size, nrow(df)))
+}
+# taxa_subset <- taxa[1:1000,]
+# taxa_chunks <- split_df(taxa_subset, 50)
+taxa_chunks <- split_df(taxa, taxa_chunk_size)
+# iter_sleep <- 0.5 # delay between chunks
 
+tic() # start timer (run together with the code that follows until and including the toc() at the end to stop the timer)
+LogMsg(glue("Processing search queries for {nrow(taxa)} species (in {length(taxa_chunks)} chunks of {taxa_chunk_size} taxa), please wait..."))
 with_progress({
       p <- progressor(steps = length(taxa_chunks))
       results_table <- taxa_chunks %>% 
         future_imap_dfr(.f = ~{
-          index = .y #chunks of list being processed
+          # making sure that global variables are available within the future (parallel) function
+          # taxa_chunk_size = taxa_chunk_size 
+          # taxa_subset = taxa_subset
+          # index = as.integer(.y) #chunks of list being processed
           taxa_chunk <- .x
           # taxa_chunk <- taxa_chunks[[1]]
          # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
           chunk_res <- process_taxa(taxa_list = taxa_chunk$`Species Name`)
-          res <- seq(1,chunk_res$count,chunk_size) %>% 
-            map_dfr(~get_NCBI_info_from_web_history(web_history_obj = chunk_res$web_history,
-                                                    rec_start = .x, chunk_size = chunk_size))
+          res <- seq(1, chunk_res$count, history_records_chunk_size) %>% 
+            map_dfr(~insistent_retrieve_info(web_history_obj = chunk_res$web_history,
+                                                    rec_start = .x, chunk_size = history_records_chunk_size))
           p()
+          # LogMsg(glue("Finished processing taxa chunk ({index*taxa_chunk_size}/{nrow(taxa_subset)})"))
           return(res)
         }) 
-    # LogMsg(glue("Finished processing search query for '{species_name}', waiting 1 seconds before the next one"))
-    Sys.sleep(0.5) # introduce a delay between queries to not to overload the server
+    
+    # Sys.sleep(iter_sleep) # introduce a delay between queries to not to overload the server
    # results_table %>% mutate(species_name = species_name, query = query)
   })
+LogMsg(glue("Finished processing taxa chunks. Overall time was:"))
+toc() # stop timer
+# save the results
+save(results_table, file = filedate(filename = "ITS_NCBI_data_all_taxa_results", ext = ".RData"))

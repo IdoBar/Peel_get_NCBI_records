@@ -41,8 +41,6 @@ searchdef <- '((internal transcribed spacer[All Fields]) OR (ITS[All Fields])) A
 species_name <- "SPECIES_NAME"
 # species.str <- '"SPECIES_NAME"[Organism] OR '
 
-
-
 #upload list
 #make sure spelling is ok and if there are synonyms for certain species.
 taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
@@ -74,7 +72,6 @@ chunked_search_strings <- data.frame(chunked_search_strings)
 #entrez_db_summary('nucleotide')	 #checking its the right database
 #entrez_db_searchable("nucleotide") #checking what search terms we can use
 
-  
 # create a function to extract the title, accession and sequence from an Entrez id
 
 get_NCBI_info <- function(res_id){
@@ -352,10 +349,11 @@ process_taxa <- function(taxa_list){
   res <- entrez_search(db="nuccore",
                        term=taxa_search_string,
                        use_history = TRUE)
-  return(res) 
+  return(res)
 }
 
-taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+
+taxa <- read_csv("input_data/records-2023-03-16.csv")[1:500,] %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 
 # use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
@@ -409,3 +407,226 @@ LogMsg(glue("Finished processing taxa chunks. Overall time was:"))
 toc() # stop timer
 # save the results
 save(results_table, file = filedate(filename = "ITS_NCBI_data_all_taxa_results", ext = ".RData"))
+
+
+
+# testing 25/05/2023 ------------------------------------------------------
+species_chunk_size <- 50
+
+taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+  mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
+library(taxize)
+taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+  mutate(scientific_name = gnr_resolve(`Species Name`, data_source_ids = "NCBI"),
+    genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
+
+#taxize to look for synonyms correct 
+
+
+# use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
+plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
+
+# run in parallel (with progress bar)
+# rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
+rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
+insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
+
+history_records_chunk_size=100
+taxa_chunk_size <- 50
+
+# taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
+# split a dataframe into subsets by size (now included in my Utils.R file that is loaded at the beginning)
+split_df <- function(df, group_size){
+  split(df, gl(ceiling(nrow(df)/group_size), group_size, nrow(df)))
+}
+# taxa_subset <- taxa[1:1000,]
+# taxa_chunks <- split_df(taxa_subset, 50)
+taxa_chunks <- split_df(taxa, taxa_chunk_size)
+# iter_sleep <- 0.5 # delay between chunks
+
+tic() # start timer (run together with the code that follows until and including the toc() at the end to stop the timer)
+LogMsg(glue("Processing search queries for {nrow(taxa)} species (in {length(taxa_chunks)} chunks of {taxa_chunk_size} taxa), please wait..."))
+with_progress({
+  p <- progressor(steps = length(taxa_chunks))
+  results_table <- taxa_chunks %>% 
+    future_imap_dfr(.f = ~{
+      # making sure that global variables are available within the future (parallel) function
+      # taxa_chunk_size = taxa_chunk_size 
+      # taxa_subset = taxa_subset
+      # index = as.integer(.y) #chunks of list being processed
+      taxa_chunk <- .x
+      # taxa_chunk <- taxa_chunks[[1]]
+      # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
+      chunk_res <- process_taxa(taxa_list = taxa_chunk$`Species Name`)
+      res <- seq(1, chunk_res$count, history_records_chunk_size) %>% 
+        map_dfr(~insistent_retrieve_info(web_history_obj = chunk_res$web_history,
+                                         rec_start = .x, chunk_size = history_records_chunk_size))
+      p()
+      # LogMsg(glue("Finished processing taxa chunk ({index*taxa_chunk_size}/{nrow(taxa_subset)})"))
+      return(res)
+    }) 
+  
+  # Sys.sleep(iter_sleep) # introduce a delay between queries to not to overload the server
+  # results_table %>% mutate(species_name = species_name, query = query)
+})
+LogMsg(glue("Finished processing taxa chunks. Overall time was:"))
+toc() # stop timer
+# save the results
+save(results_table, file = filedate(filename = "ITS_NCBI_data_all_taxa_results", ext = ".RData"))
+
+get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_size=100){
+  # rec_start = 1
+  # chunk_size=50
+  # web_history_obj = res$web_history
+  # fetch this entry as FASTA
+  res_fasta <- entrez_fetch(db='nuccore', rettype = c("fasta")  , # id = res_id, 
+                            web_history = web_history_obj,
+                            retmax=chunk_size, retstart=rec_start)
+  # convert into a vector
+  fasta_vector <- str_split(res_fasta, pattern = ">") %>% unlist() %>% .[-1] %>% 
+                  paste0(">", .)
+  # res_features <- entrez_fetch(db="nuccore",  rettype="text", # id=res_id,
+  #                              web_history = web_history_obj , 
+  #                              retmax=chunk_size, retstart=rec_start) 
+  # fetch this entry's summary info
+  res_summary <- entrez_summary(db='nuccore', web_history = web_history_obj, #  id = res_id, 
+                                retmax=chunk_size, retstart=rec_start) %>% 
+    extract_from_esummary(., c("title", "extra", "taxid", 'subtype', 'organism', 
+                               'gi', 'uid'), simplify = FALSE)
+  
+  # res_summary[[1]]
+  summary_table <- res_summary %>% 
+    map_dfr(.f = ~as_tibble(.x) %>% mutate(across(everything(), .fns = as.character)))
+  # summary_table$extra[2]
+  
+  # create a table with the transcript info
+  if (!"subtype" %in% names(summary_table)) summary_table$subtype <- ""
+  if (!"taxid" %in% names(summary_table)) summary_table$taxid <- ""
+  sequence_info <- summary_table %>% rename(feature = subtype) %>% 
+    mutate(fasta = fasta_vector, taxid = as.integer(taxid)) # also process accession out of the extra column
+  # sequence_info$organism
+  return(sequence_info)
+}
+
+
+
+
+
+# trying to resolve index error... ----------------------------------------
+
+searchdef <- '((internal transcribed spacer[All Fields]) OR (ITS[All Fields])) AND (plants[filter]) AND (200[SLEN] : 2500[SLEN]) AND (flowering plants[porgn]) AND'
+
+species_name <- "SPECIES_NAME"
+
+#upload list
+#make sure spelling is ok and if there are synonyms for certain species.
+taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+  mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
+
+# split a dataframe into subsets by size (now included in my Utils.R file that is loaded at the beginning)
+taxa_chunk_size <- 50
+history_records_chunk_size=100
+
+# split_df <- function(df, group_size){
+#   split(df, gl(ceiling(nrow(df)/group_size), group_size, nrow(df)))
+# }
+
+split_df <- function(df, group_size) {
+  num_rows <- nrow(df)
+  num_chunks <- ceiling(num_rows / group_size)
+  rows_needed <- num_chunks * group_size
+  
+  if (rows_needed > num_rows) {
+    last_row <- df[num_rows, ]
+    df <- rbind(df, last_row)
+    num_rows <- nrow(df)
+  }
+  
+  chunks <- split(df, rep(1:num_chunks, each = group_size, length.out = num_rows))
+  return(chunks)
+}
+
+
+
+taxa_chunks <- split_df(taxa, taxa_chunk_size)
+# Step 2: Load functions --------------------------------------------------
+process_taxa <- function(taxa_list){
+  # create test dataset
+  #taxa_subset <- head(taxa, n = 50)
+  taxa_search_string <- paste0(searchdef, " (",
+                               paste(glue('"{taxa_list}"[Organism]'), collapse = " OR "), ")")
+  # try to retrieve all search results for all species at once!!
+  res <- entrez_search(db="nuccore",
+                       term=taxa_search_string,
+                       use_history = TRUE)
+  return(res)
+}
+get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_size=100){
+  # rec_start = 1
+  # chunk_size=50
+  # web_history_obj = res$web_history
+  # fetch this entry as FASTA
+  res_fasta <- entrez_fetch(db='nuccore', rettype = c("fasta")  , # id = res_id, 
+                            web_history = web_history_obj,
+                            retmax=chunk_size, retstart=rec_start)
+  # convert into a vector
+  fasta_vector <- str_split(res_fasta, pattern = ">") %>% unlist() %>% .[-1] %>% 
+    paste0(">", .)
+  # res_features <- entrez_fetch(db="nuccore",  rettype="text", # id=res_id,
+  #                              web_history = web_history_obj , 
+  #                              retmax=chunk_size, retstart=rec_start) 
+  # fetch this entry's summary info
+  res_summary <- entrez_summary(db='nuccore', web_history = web_history_obj, #  id = res_id, 
+                                retmax=chunk_size, retstart=rec_start) %>% 
+    extract_from_esummary(., c("title", "extra", "taxid", 'subtype', 'organism', 
+                               'gi', 'uid'), simplify = FALSE)
+  
+  # res_summary[[1]]
+  summary_table <- res_summary %>% 
+    map_dfr(.f = ~as_tibble(.x) %>% mutate(across(everything(), .fns = as.character)))
+  # summary_table$extra[2]
+  
+  # create a table with the transcript info
+  if (!"subtype" %in% names(summary_table)) summary_table$subtype <- ""
+  if (!"taxid" %in% names(summary_table)) summary_table$taxid <- ""
+  sequence_info <- summary_table %>% rename(feature = subtype) %>% 
+    mutate(fasta = fasta_vector, taxid = as.integer(taxid)) # also process accession out of the extra column
+  # sequence_info$organism
+  return(sequence_info)
+}
+# use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
+plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
+
+# run in parallel (with progress bar)
+# rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
+rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
+insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
+
+# Step 3: Process ---------------------------------------------------------
+tic() # start timer (run together with the code that follows until and including the toc() at the end to stop the timer)
+LogMsg(glue("Processing search queries for {nrow(taxa)} species (in {length(taxa_chunks)} chunks of {taxa_chunk_size} taxa), please wait..."))
+with_progress({
+  p <- progressor(steps = length(taxa_chunks))
+  results_table <- taxa_chunks %>% 
+    future_imap_dfr(.f = ~{
+      # making sure that global variables are available within the future (parallel) function
+      # taxa_chunk_size = taxa_chunk_size 
+      # taxa_subset = taxa_subset
+      # index = as.integer(.y) #chunks of list being processed
+      taxa_chunk <- .x
+      # taxa_chunk <- taxa_chunks[[1]]
+      # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
+      chunk_res <- process_taxa(taxa_list = taxa_chunk$`Species Name`)
+      res <- seq(0, chunk_res$count -1, history_records_chunk_size) %>% 
+        map_dfr(~insistent_retrieve_info(web_history_obj = chunk_res$web_history,
+                                         rec_start = .x, chunk_size = history_records_chunk_size))
+      p()
+      # LogMsg(glue("Finished processing taxa chunk ({index*taxa_chunk_size}/{nrow(taxa_subset)})"))
+      return(res)
+    }) 
+  
+  # Sys.sleep(iter_sleep) # introduce a delay between queries to not to overload the server
+  # results_table %>% mutate(species_name = species_name, query = query)
+})
+LogMsg(glue("Finished processing taxa chunks. Overall time was:"))
+toc() # stop timer

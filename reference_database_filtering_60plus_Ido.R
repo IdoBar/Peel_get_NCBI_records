@@ -16,7 +16,11 @@
 devtools::source_gist("7f63547158ecdbacf31b54a58af0d1cc", filename = "Util.R")
 
 #load packages
-pacman::p_load(tidyverse, rentrez, janitor, glue, furrr, progressr, seqinr, taxonomizr, tictoc)
+packages <- c("tidyverse", "janitor", "glue", "furrr", "progressr", "seqinr", 
+              "taxonomizr", "tictoc", 'allenbaron/rentrez')
+pak::pak(packages) # install packages
+
+pacman::p_load(char = basename(packages))
 
 # set NCBI API key - this allows yo to send more queries to Entrez without timing out - see more details at https://support.nlm.nih.gov/knowledgebase/article/KA-05318/en-us and https://support.nlm.nih.gov/knowledgebase/article/KA-05317/en-us
 set_entrez_key("33ec35e1973e4928beafd47bee86492be109")
@@ -98,6 +102,8 @@ get_NCBI_info <- function(res_id){
 
 # use web history!! (see https://docs.ropensci.org/rentrez/articles/rentrez_tutorial.html#get-a-web_history-object-from-entrez_search-or-entrez_link)
 
+safe_get_summary <- safely(entrez_summary)
+
 get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_size=100){
   # rec_start = 1
   # chunk_size=50
@@ -113,11 +119,12 @@ get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_siz
   #                              web_history = web_history_obj , 
   #                              retmax=chunk_size, retstart=rec_start) 
   # fetch this entry's summary info
-  res_summary <- entrez_summary(db='nuccore',web_history = web_history_obj, #  id = res_id, 
-                                retmax=chunk_size, retstart=rec_start) %>% 
+  safe_res <- safe_get_summary(db='nuccore',web_history = web_history_obj, #  id = res_id, 
+                                retmax=chunk_size, retstart=rec_start) 
+  if (is.null(safe_res$result)) return(NULL)
+  res_summary <- safe_res$result %>% 
     extract_from_esummary(., c("title", "extra", "taxid", 'subtype', 'organism', 
                                'gi', 'uid'), simplify = FALSE)
-  
   # res_summary[[1]]
   summary_table <- res_summary %>% 
     map_dfr(.f = ~as_tibble(.x) %>% mutate(across(everything(), .fns = as.character)))
@@ -125,6 +132,7 @@ get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_siz
   
     # create a table with the transcript info
   if (!"subtype" %in% names(summary_table)) summary_table$subtype <- ""
+  if (!"taxid" %in% names(summary_table)) summary_table$taxid <- NA
   sequence_info <- summary_table %>% rename(feature = subtype) %>% 
     mutate(fasta = fasta_vector, taxid = as.integer(taxid)) # also process accession out of the extra column
   # sequence_info$organism
@@ -133,7 +141,7 @@ get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_siz
 
 
 # use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
-plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
+plan(multisession, workers = min(4, availableCores()-1)) # adjust cores based on your computer (but too many will cause the server to reject the requests)
 
 # run in parallel (with progress bar)
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
@@ -353,11 +361,11 @@ process_taxa <- function(taxa_list){
 }
 
 
-taxa <- read_csv("input_data/records-2023-03-16.csv")[1:500,] %>% select(`Species Name`) %>% 
+taxa <- read_csv("input_data/records-2023-03-16.csv")[1:100,] %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 
 # use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
-plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
+plan(multisession, workers = min(4, availableCores()-1)) # adjust cores based on your computer (but too many will cause the server to reject the requests)
 
 # run in parallel (with progress bar)
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
@@ -383,7 +391,7 @@ LogMsg(glue("Processing search queries for {nrow(taxa)} species (in {length(taxa
 with_progress({
       p <- progressor(steps = length(taxa_chunks))
       results_table <- taxa_chunks %>% 
-        future_imap_dfr(.f = ~{
+        future_map_dfr(.f = ~{
           # making sure that global variables are available within the future (parallel) function
           # taxa_chunk_size = taxa_chunk_size 
           # taxa_subset = taxa_subset
@@ -411,7 +419,7 @@ save(results_table, file = filedate(filename = "ITS_NCBI_data_all_taxa_results",
 
 
 # testing 25/05/2023 ------------------------------------------------------
-species_chunk_size <- 50
+species_chunk_size <- 20
 
 taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
@@ -424,14 +432,14 @@ taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`)
 
 
 # use furrr and progressr to process these in parallel, see https://furrr.futureverse.org/articles/progress.html
-plan(multisession, workers = min(4, availableCores())) # adjust cores based on your computer (but too many will cause the server to reject the requests)
+plan(multisession, workers = min(4, availableCores()-1)) # adjust cores based on your computer (but too many will cause the server to reject the requests)
 
 # run in parallel (with progress bar)
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
 rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
 insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
 
-history_records_chunk_size=100
+history_records_chunk_size=50
 taxa_chunk_size <- 50
 
 # taxa_chunks <- seq(1, nrow(taxa), species_chunk_size) 
@@ -441,6 +449,8 @@ split_df <- function(df, group_size){
 }
 # taxa_subset <- taxa[1:1000,]
 # taxa_chunks <- split_df(taxa_subset, 50)
+history_records_chunk_size=50
+taxa_chunk_size <- 50
 taxa_chunks <- split_df(taxa, taxa_chunk_size)
 # iter_sleep <- 0.5 # delay between chunks
 
@@ -473,6 +483,63 @@ LogMsg(glue("Finished processing taxa chunks. Overall time was:"))
 toc() # stop timer
 # save the results
 save(results_table, file = filedate(filename = "ITS_NCBI_data_all_taxa_results", ext = ".RData"))
+# Parallel processing of web_histories within a taxa chunk ####
+'Halodule uninervis' %in% taxa$`Species Name`
+taxa_chunk <- taxa_chunks[[1]]
+
+process_taxa_chunk <- function(taxa_chunk){
+  chunk_res <- process_taxa(taxa_list = taxa_chunk$`Species Name`)
+  history_chunk_indices <- seq(1, chunk_res$count, history_records_chunk_size)
+  
+  tic() # start timer (run together with the code that follows until and including the toc() at the end to stop the timer)
+  LogMsg(glue("Processing search queries for {nrow(taxa_chunk)} species (in {length(history_chunk_indices)} chunks of {taxa_chunk_size} taxa), please wait..."))
+  with_progress({
+    p <- progressor(steps = length(history_chunk_indices))
+    chunk_results <- history_chunk_indices %>% 
+      future_map_dfr(.f = ~{
+        # making sure that global variables are available within the future (parallel) function
+        # taxa_chunk_size = taxa_chunk_size 
+        # taxa_subset = taxa_subset
+        # index = as.integer(.y) #chunks of list being processed
+        
+        # taxa_chunk <- taxa_chunks[[1]]
+        # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
+        
+        res <-  insistent_retrieve_info(web_history_obj = chunk_res$web_history,
+                                        rec_start = .x, chunk_size = history_records_chunk_size)
+        p()
+        # LogMsg(glue("Finished processing taxa chunk ({index*taxa_chunk_size}/{nrow(taxa_subset)})"))
+        return(res)
+      }) 
+    
+    # Sys.sleep(iter_sleep) # introduce a delay between queries to not to overload the server
+    # results_table %>% mutate(species_name = species_name, query = query)
+  })
+  LogMsg(glue("Finished processing taxa chunk. Overall time was:"))
+  toc() # stop timer
+  return(chunk_results)
+}
+
+chunk2_results <- process_taxa_chunk(taxa_chunks[[2]])
+
+# try running a large set
+history_records_chunk_size=50
+taxa_chunk_size <- 100
+taxa_chunks <- split_df(taxa, taxa_chunk_size)
+all_results <- taxa_chunks %>% 
+  map_dfr(.f = ~{
+    tic() # start timer (run together with the code that follows until and including the toc() at the end to stop the timer)
+    LogMsg(glue("Processing search queries for {length(taxa_chunks)} chunks (in {length(history_chunk_indices)} chunks of {taxa_chunk_size} taxa), please wait..."))
+    res <- process_taxa_chunk(taxa_chunk=.x)
+    LogMsg(glue("Finished processing taxa chunk. Overall time was:"))
+    toc() # stop timer
+    return(res)
+  })
+
+
+
+
+
 
 get_NCBI_info_from_web_history <- function(web_history_obj, rec_start, chunk_size=100){
   # rec_start = 1
@@ -520,7 +587,7 @@ species_name <- "SPECIES_NAME"
 
 #upload list
 #make sure spelling is ok and if there are synonyms for certain species.
-taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+taxa <- read_csv("input_data/records-2023-03-16.csv")[1:1000,] %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 
 # split a dataframe into subsets by size (now included in my Utils.R file that is loaded at the beginning)
@@ -599,7 +666,7 @@ plan(multisession, workers = min(4, availableCores())) # adjust cores based on y
 
 # run in parallel (with progress bar)
 # rerun command if it fails (see https://purrr.tidyverse.org/reference/insistently.html)
-rate <- rate_delay(0.3, max_times = 10) # introduce a delay between queries to not to overload the server
+rate <- rate_delay(1, max_times = 5) # introduce a delay between queries to not to overload the server
 insistent_retrieve_info <- insistently(get_NCBI_info_from_web_history, rate = rate, quiet = FALSE)
 
 # Step 3: Process ---------------------------------------------------------
@@ -617,7 +684,7 @@ with_progress({
       # taxa_chunk <- taxa_chunks[[1]]
       # LogMsg(glue("Processing search queries ({index}/{length(taxa_chunks)}), please wait..."))
       chunk_res <- process_taxa(taxa_list = taxa_chunk$`Species Name`)
-      res <- seq(0, chunk_res$count -1, history_records_chunk_size) %>% 
+      res <- seq(0, chunk_res$count -1, history_records_chunk_size) %>% #THIS IS THE LINE WHERE I THINK ERROR IS COMING FROM
         map_dfr(~insistent_retrieve_info(web_history_obj = chunk_res$web_history,
                                          rec_start = .x, chunk_size = history_records_chunk_size))
       p()

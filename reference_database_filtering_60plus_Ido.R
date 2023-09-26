@@ -47,11 +47,11 @@ species_name <- "SPECIES_NAME"
 
 #upload list
 #make sure spelling is ok and if there are synonyms for certain species.
-taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+taxa <- read_csv("input_data/records-2023-09-26.csv") %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]'))
 # taxa <- taxa[,2]
 # create test dataset
-test_set <- head(taxa, n = 50)
+test_set <- head(taxa, n = 5000)
 
 test_search_string <- paste0(searchdef, " (",
                             paste(glue('"{test_set$`Species Name`}"[Organism]'), collapse = " OR "), ")")
@@ -421,12 +421,12 @@ save(results_table, file = filedate(filename = "ITS_NCBI_data_all_taxa_results",
 # testing 25/05/2023 ------------------------------------------------------
 species_chunk_size <- 20
 
-taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+taxa <- read_csv("input_data/records-2023-09-26.csv") %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 library(taxize)
-taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
-  mutate(scientific_name = gnr_resolve(`Species Name`, data_source_ids = "NCBI"),
-    genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
+# taxa <- read_csv("input_data/records-2023-03-16.csv") %>% select(`Species Name`) %>% 
+#   mutate(scientific_name = gnr_resolve(`Species Name`, data_source_ids = "NCBI"),
+#     genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 
 #taxize to look for synonyms correct 
 
@@ -587,16 +587,12 @@ species_name <- "SPECIES_NAME"
 
 #upload list
 #make sure spelling is ok and if there are synonyms for certain species.
-taxa <- read_csv("input_data/records-2023-03-16.csv")[1:1000,] %>% select(`Species Name`) %>% 
+taxa <- read_csv("input_data/records-2023-09-26.csv")[17001:18095,] %>% select(`Species Name`) %>% 
   mutate(genebank.search=glue('{searchdef} "{`Species Name`}"[Organism]')) 
 
 # split a dataframe into subsets by size (now included in my Utils.R file that is loaded at the beginning)
 taxa_chunk_size <- 50
 history_records_chunk_size=100
-
-# split_df <- function(df, group_size){
-#   split(df, gl(ceiling(nrow(df)/group_size), group_size, nrow(df)))
-# }
 
 split_df <- function(df, group_size) {
   num_rows <- nrow(df)
@@ -612,8 +608,6 @@ split_df <- function(df, group_size) {
   chunks <- split(df, rep(1:num_chunks, each = group_size, length.out = num_rows))
   return(chunks)
 }
-
-
 
 taxa_chunks <- split_df(taxa, taxa_chunk_size)
 # Step 2: Load functions --------------------------------------------------
@@ -674,7 +668,7 @@ tic() # start timer (run together with the code that follows until and including
 LogMsg(glue("Processing search queries for {nrow(taxa)} species (in {length(taxa_chunks)} chunks of {taxa_chunk_size} taxa), please wait..."))
 with_progress({
   p <- progressor(steps = length(taxa_chunks))
-  results_table <- taxa_chunks %>% 
+  results_table9.2 <- taxa_chunks %>% 
     future_imap_dfr(.f = ~{
       # making sure that global variables are available within the future (parallel) function
       # taxa_chunk_size = taxa_chunk_size 
@@ -697,3 +691,4 @@ with_progress({
 })
 LogMsg(glue("Finished processing taxa chunks. Overall time was:"))
 toc() # stop timer
+
